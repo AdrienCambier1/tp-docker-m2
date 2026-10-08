@@ -1,0 +1,6 @@
+*
+!app.py
+!test_app.py
+!pytest.ini
+!requirements.txt
+!requirements-dev.txt
