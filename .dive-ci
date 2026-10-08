@@ -1,0 +1,5 @@
+# Seuils Dive en mode CI (CI=true) - lus automatiquement depuis la racine du dépôt
+rules:
+  lowestEfficiency: 0.80          # échec si efficience < 80 %
+  highestUserWastedPercent: 0.10  # échec si > 10 % d'octets gaspillés
+  highestWastedBytes: disabled
