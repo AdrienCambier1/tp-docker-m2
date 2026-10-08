@@ -1,2 +1,5 @@
-- !app.py
-  !requirements.txt
+# Liste blanche : tout est exclu (Git, secrets, .env, caches, tests, logs, archives)
+# sauf les deux fichiers copiés par le Dockerfile.
+*
+!app.py
+!requirements.txt

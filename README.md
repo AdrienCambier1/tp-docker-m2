@@ -9,8 +9,8 @@ et publication sur GHCR.
 - [PostgreSQL](https://github.com/AdrienCambier1/tp-docker-m2/pkgs/container/tp-docker-m2-db)
 
 ```powershell
-docker pull ghcr.io/adriencambier1/tp-docker-m2-api:1.0.0
-docker pull ghcr.io/adriencambier1/tp-docker-m2-db:1.0.0
+docker pull ghcr.io/adriencambier1/tp-docker-m2-api:1.0.1
+docker pull ghcr.io/adriencambier1/tp-docker-m2-db:1.0.1
 ```
 
 La version `1.0.0` est la première livraison durcie. Le code actuel est également
@@ -36,7 +36,7 @@ L'API répond sur `http://127.0.0.1:5000`. Pour tester la version publiée,
 remplacer la commande `up` par :
 
 ```powershell
-$env:API_IMAGE = "ghcr.io/adriencambier1/tp-docker-m2-api:1.0.0"
+$env:API_IMAGE = "ghcr.io/adriencambier1/tp-docker-m2-api:1.0.1"
 docker compose up -d --no-build --wait --wait-timeout 120
 ```
 
@@ -50,14 +50,14 @@ pas le mot de passe d'une base déjà initialisée.
 
 Mesures initiales du durcissement et mesures du build actuel, au 8 octobre 2026.
 
-| Critère | API avant | API après | DB avant | DB après |
-|---|---|---|---|---|
-| Taille Docker | 223 Mo | 122 Mo | 415 Mo | 540 Mo |
-| Utilisateur | root | UID 65532 | root puis `gosu` | UID 70 |
-| Shell | oui | non | oui | oui |
-| CVE Trivy, toutes sévérités | 185 | 0 | 47 | 0 |
-| Efficience Dive | 97,36 % | 99,71 % | — | — |
-| Port publié | 5000, toutes interfaces | 5000, localhost | 5432 | aucun |
+| Critère                     | API avant               | API après       | DB avant         | DB après |
+| --------------------------- | ----------------------- | --------------- | ---------------- | -------- |
+| Taille Docker               | 223 Mo                  | 122 Mo          | 415 Mo           | 540 Mo   |
+| Utilisateur                 | root                    | UID 65532       | root puis `gosu` | UID 70   |
+| Shell                       | oui                     | non             | oui              | oui      |
+| CVE Trivy, toutes sévérités | 185                     | 0               | 47               | 0        |
+| Efficience Dive             | 97,36 %                 | 99,71 %         | —                | —        |
+| Port publié                 | 5000, toutes interfaces | 5000, localhost | 5432             | aucun    |
 
 Le shell PostgreSQL est utilisé par le script d'initialisation de l'image officielle
 Chainguard. L'absence de shell est imposée au runtime de l'API.
@@ -95,12 +95,12 @@ API. La CI vérifie aussi `/health` et `/dbtest` en HTTP sur l'API démarrée.
 
 Scan du manifeste original :
 
-| Paquet initial | Vulnérabilités | Correction |
-|---|---|---|
-| Flask 2.3.2 | CVE-2026-27205 (LOW) | 3.1.3 |
-| Werkzeug 2.3.3 | CVE-2024-34069 (HIGH) | 3.1.9 |
-| Werkzeug 2.3.3 | CVE-2023-46136, CVE-2024-49766, CVE-2024-49767, CVE-2025-66221, CVE-2026-21860, CVE-2026-27199, CVE-2026-102598 (MEDIUM) | 3.1.9 |
-| pytest 7.4.0 | CVE-2025-71176 (MEDIUM) | 9.1.1, installé uniquement pour les tests |
+| Paquet initial | Vulnérabilités                                                                                                           | Correction                                |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------- |
+| Flask 2.3.2    | CVE-2026-27205 (LOW)                                                                                                     | 3.1.3                                     |
+| Werkzeug 2.3.3 | CVE-2024-34069 (HIGH)                                                                                                    | 3.1.9                                     |
+| Werkzeug 2.3.3 | CVE-2023-46136, CVE-2024-49766, CVE-2024-49767, CVE-2025-66221, CVE-2026-21860, CVE-2026-27199, CVE-2026-102598 (MEDIUM) | 3.1.9                                     |
+| pytest 7.4.0   | CVE-2025-71176 (MEDIUM)                                                                                                  | 9.1.1, installé uniquement pour les tests |
 
 `psycopg2-binary` est fixé à 2.9.13 et Gunicorn 26.2.0 remplace le serveur Flask
 de développement. Pip et les outils du builder ne sont pas copiés dans le runtime.
