@@ -1,35 +1,120 @@
+name: tp-docker-m2
+
+# Ancres YAML : options de durcissement communes à tous les services
+x-hardening: &hardening
+  read_only: true                      # système de fichiers racine en lecture seule
+  cap_drop: [ALL]                      # aucune capability Linux
+  security_opt:
+    - no-new-privileges:true           # interdit l'élévation via setuid/setgid
+  restart: unless-stopped
+
+x-db-env: &db-env
+  DB_HOST: db
+  DB_PORT: "5432"
+  DB_NAME: ${POSTGRES_DB:-appdb}
+  DB_USER: ${POSTGRES_USER:-appuser}
+  DB_PASSWORD_FILE: /run/secrets/db_password
+
 services:
-  api-python:
-    build: .
-    ports:
-      - "5000:5000"
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${API_IMAGE:-tp-docker-m2-api:local}
+    <<: *hardening
+    user: "65532:65532"
     environment:
-      - ENV=test
-      - DB_USER=testuser
-      - DB_PASSWORD=testpass
-      - DB_NAME=testdb
-      - DB_HOST=db
-      - DB_PORT=5432
+      <<: *db-env
+    secrets:
+      - db_password
+    ports:
+      - "127.0.0.1:5000:5000"          # exposé uniquement sur la boucle locale de l'hôte
+    networks:
+      - frontend
+      - backend
+    tmpfs:
+      - /tmp:size=16m
     depends_on:
       db:
-        condition: service_healthy
-  
-  db:
-    image: postgres:14-alpine
-    environment:
-      POSTGRES_USER: testuser
-      POSTGRES_PASSWORD: testpass
-      POSTGRES_DB: testdb
-    ports:
-      - "5432:5432"
-    volumes:
-      - db-data-test:/var/lib/postgresql/data
+        condition: service_healthy     # l'API attend que PostgreSQL soit réellement sain
+        restart: true
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U testuser -d testdb"]
+      # Forme exec : pas de shell dans l'image, on utilise Python + urllib (stdlib)
+      test:
+        - CMD
+        - /usr/bin/python
+        - -c
+        - "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=3).status == 200 else 1)"
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 10s
+    mem_limit: 256m
+    pids_limit: 100
+    cpus: 0.5
+
+  db:
+    # Chainguard Postgres épinglé par digest SHA256 immuable
+    image: cgr.dev/chainguard/postgres@sha256:0c4eaf6cb9bd65337d834f5ebfe79add4312ee2125ab584bf1fbc071abc6bb8f
+    <<: *hardening
+    user: "70:70"                      # compte système "postgres" de l'image (pas de root)
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-appuser}
+      POSTGRES_DB: ${POSTGRES_DB:-appdb}
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+    secrets:
+      - db_password
+    volumes:
+      # Monté sur le parent (propriété UID 70 dans l'image) : le volume hérite des
+      # bons droits et PGDATA (/var/lib/postgresql/data) est créé par initdb.
+      - db-data:/var/lib/postgresql
+    tmpfs:
+      - /var/run/postgresql:uid=70,gid=70,mode=0700
+      - /tmp:size=64m
+    networks:
+      - backend                        # aucun port publié : joignable uniquement par l'API
+    healthcheck:
+      # Forme exec : utilitaire client pg_isready fourni par l'image
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "${POSTGRES_USER:-appuser}", "-d", "${POSTGRES_DB:-appdb}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
       start_period: 30s
+    mem_limit: 512m
+    pids_limit: 200
+    shm_size: 128m
+
+  # Conteneur de tests pytest (lancé à la demande : --profile test)
+  tests:
+    build:
+      context: .
+      dockerfile: Dockerfile.test
+    image: tp-docker-m2-tests:local
+    profiles: ["test"]
+    <<: *hardening
+    restart: "no"
+    environment:
+      <<: *db-env
+    secrets:
+      - db_password
+    networks:
+      - backend
+    tmpfs:
+      - /tmp:size=16m
+    depends_on:
+      api:
+        condition: service_healthy
+
+networks:
+  frontend: {}
+  backend:
+    internal: true                     # réseau isolé : pas de sortie vers Internet
 
 volumes:
-  db-data-test:
+  db-data: {}
+
+secrets:
+  db_password:
+    # Secret fichier (non versionné, généré localement ou par la CI). Le
+    # type "file" est le seul compatible avec read_only: true.
+    file: ./secrets/db_password.txt
