@@ -9,7 +9,6 @@ logger = logging.getLogger(__name__)
 
 
 def read_secret(name, default=None):
-    """Lit un secret depuis <NAME>_FILE (Docker secret), sinon <NAME>."""
     secret_file = os.getenv(f"{name}_FILE")
     if secret_file:
         with open(secret_file, encoding="utf-8") as f:
@@ -60,7 +59,6 @@ def db_test():
         else:
             return jsonify({"db_connection": "failed"}), 500
     except Exception:
-        # Le détail de l'erreur reste dans les logs, pas dans la réponse
         logger.exception("Database connection failed")
         return jsonify({"db_connection": "failed"}), 500
 
