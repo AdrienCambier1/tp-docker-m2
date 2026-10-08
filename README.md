@@ -16,12 +16,11 @@ Les deux packages sont publics :
 Commandes pour récupérer la version déjà publiée :
 
 ```powershell
-docker pull ghcr.io/adriencambier1/tp-docker-m2-api:1.0.0
-docker pull ghcr.io/adriencambier1/tp-docker-m2-db:1.0.0
+docker pull ghcr.io/adriencambier1/tp-docker-m2-api:1.0.1
+docker pull ghcr.io/adriencambier1/tp-docker-m2-db:1.0.1
 ```
 
-La version `1.0.0` précède le nettoyage décrit dans ce README. Pour tester le
-code actuel, construire l'image localement. Prérequis de lancement : Docker avec
+La version `1.0.1` correspond au code décrit dans ce README. Prérequis de lancement : Docker avec
 des conteneurs Linux. Python, pytest et PostgreSQL sont exécutés dans les conteneurs.
 
 Depuis la racine du dépôt, dans PowerShell :
@@ -58,7 +57,7 @@ de l'initialisation, pas pour changer automatiquement un mot de passe existant.
 Pour démarrer l'API déjà publiée, après avoir créé le secret :
 
 ```powershell
-$env:API_IMAGE = "ghcr.io/adriencambier1/tp-docker-m2-api:1.0.0"
+$env:API_IMAGE = "ghcr.io/adriencambier1/tp-docker-m2-api:1.0.1"
 docker compose up -d --no-build --wait --wait-timeout 120
 docker compose run --rm --no-deps tests
 docker compose down
@@ -202,8 +201,8 @@ Pour une prochaine version, après avoir commité les changements :
 
 ```powershell
 git push origin main
-git tag v1.0.1
-git push origin v1.0.1
+git tag v1.0.2
+git push origin v1.0.2
 ```
 
 ## 7. Preuves d'exécution
@@ -217,6 +216,7 @@ Vérifications locales du projet nettoyé, le 8 octobre 2026 :
 | Configuration Compose | valide ; API et DB au démarrage, tests dans un profil facultatif |
 | Actionlint et ShellCheck du workflow | code de sortie 0 |
 | Build multi-stage | réussi |
+| Contexte de build (`.dockerignore`) | uniquement `app.py` et `requirements.txt` ; ni `.git` ni `secrets/` |
 | Runtime API | UID 65532 ; aucun shell, pip ou compilateur ; aucun `.pyc` dans les dépendances |
 | Dive | 99,7126 % ; seuil de 80 % validé ; 237 208 octets gaspillés |
 | Trivy API / dépendances / DB | 0 vulnérabilité, toutes sévérités |
@@ -234,7 +234,7 @@ docker compose run --rm --no-deps tests
 # 3 passed in 0.23s
 ```
 
-La [CI de la version 1.0.0](https://github.com/AdrienCambier1/tp-docker-m2/actions/runs/37759486337)
-prouve la publication précédente. Le workflow nettoyé est validé localement ;
-son exécution sur GitHub et la publication du nouveau build nécessitent de
-commiter et pousser ces modifications.
+La [CI de la version 1.0.1](https://github.com/AdrienCambier1/tp-docker-m2/actions?query=branch%3Av1.0.1)
+prouve l'exécution complète du pipeline sur GitHub et la publication sur GHCR
+(la [CI de la version 1.0.0](https://github.com/AdrienCambier1/tp-docker-m2/actions/runs/37759486337)
+reste disponible pour la publication précédente).
