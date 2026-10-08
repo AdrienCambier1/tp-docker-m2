@@ -1,267 +1,240 @@
-# Hardening Flask / PostgreSQL — Rapport technique
+# Hardening Flask / PostgreSQL
 
-Microservice Flask + PostgreSQL durci : images distroless Chainguard épinglées par
-digest, exécution non-root, Compose isolé, pipeline GitHub Actions bloquant
-(Flake8 → Hadolint → Build/Dive → Trivy → Intégration → Release GHCR SemVer).
+Le projet contient une API Flask, une base PostgreSQL et les contrôles demandés
+par le sujet. Un seul Dockerfile construit l'API ; Compose démarre deux services.
+Les tests pytest fournis utilisent le client Flask et tournent dans un conteneur
+temporaire du profil `test`, connecté à la même base. Ce conteneur ne nécessite
+pas de Dockerfile supplémentaire.
 
-Le détail chronologique de toutes les étapes est dans [JOURNAL.md](JOURNAL.md).
+## 1. Packages publics et lancement
 
-```
-.
-├── app.py / test_app.py / pytest.ini
-├── requirements.txt          # runtime (épinglé, 0 CVE)
-├── requirements-dev.txt      # pytest, flake8
-├── Dockerfile                # multi-stage : chainguard/python:latest-dev -> chainguard/python (distroless)
-├── Dockerfile.test           # image pytest (+ Dockerfile.test.dockerignore)
-├── docker-compose.yml        # api + db + tests (profil "test")
-├── .dockerignore  .hadolint.yaml  .dive-ci  .flake8
-├── .env.example              # surcharges optionnelles (utilisateur / base)
-└── .github/workflows/ci-cd.yaml
-```
+Les deux packages sont publics :
 
----
+- [API Flask](https://github.com/AdrienCambier1/tp-docker-m2/pkgs/container/tp-docker-m2-api)
+- [PostgreSQL](https://github.com/AdrienCambier1/tp-docker-m2/pkgs/container/tp-docker-m2-db)
 
-## 1. Liens publics des packages GHCR
+Commandes pour récupérer la version déjà publiée :
 
-| Image | Package |
-|-------|---------|
-| API Flask | https://github.com/AdrienCambier1/tp-docker-m2/pkgs/container/tp-docker-m2-api |
-| PostgreSQL | https://github.com/AdrienCambier1/tp-docker-m2/pkgs/container/tp-docker-m2-db |
-
-> Les packages sont créés au premier passage du job `release`. Pour qu'ils soient
-> publics : *Package settings → Change visibility → Public*.
-
-Une version est publiée en poussant un tag SemVer :
-
-```bash
-git tag v1.0.0 && git push origin v1.0.0
-```
-
-Récupération et test :
-
-```bash
+```powershell
 docker pull ghcr.io/adriencambier1/tp-docker-m2-api:1.0.0
 docker pull ghcr.io/adriencambier1/tp-docker-m2-db:1.0.0
 ```
 
-```bash
-mkdir -p secrets && openssl rand -base64 32 | tr -d '\n' > secrets/db_password.txt
-API_IMAGE=ghcr.io/adriencambier1/tp-docker-m2-api:1.0.0 docker compose up -d --no-build --wait
-curl http://127.0.0.1:5000/dbtest
+La version `1.0.0` précède le nettoyage décrit dans ce README. Pour tester le
+code actuel, construire l'image localement. Prérequis de lancement : Docker avec
+des conteneurs Linux. Python, pytest et PostgreSQL sont exécutés dans les conteneurs.
+
+Depuis la racine du dépôt, dans PowerShell :
+
+```powershell
+New-Item -ItemType Directory -Force secrets | Out-Null
+if (!(Test-Path secrets/db_password.txt)) {
+    $secretBytes = New-Object byte[] 32
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    $rng.GetBytes($secretBytes)
+    $rng.Dispose()
+    [IO.File]::WriteAllText("$PWD/secrets/db_password.txt", [Convert]::ToBase64String($secretBytes))
+}
+docker compose up -d --build --wait --wait-timeout 120
+docker compose run --rm --no-deps tests
 ```
 
-Tags produits : `1.0.0`, `1.0`, `1`, `latest`, `sha-<commit>` pour un tag `v1.0.0` ;
-`edge` et `sha-<commit>` pour un push sur `main`.
+Les routes sont `/health`, `/hello` et `/dbtest`, sur `http://127.0.0.1:5000`.
+`docker compose up` démarre seulement l'API et la base. La commande `run tests`
+active ponctuellement le profil `test` et supprime le conteneur après les tests.
+`pytest.ini` déclare le marqueur `integration` utilisé dans le fichier fourni.
+Pour arrêter les services : `docker compose down`. Le volume conserve les données.
 
----
+Les valeurs `POSTGRES_DB` et `POSTGRES_USER` ont des valeurs par défaut dans
+Compose ; elles peuvent être surchargées par les variables d'environnement ou un
+fichier `.env` facultatif. Le mot de passe est dans
+`secrets/db_password.txt`, ignoré par Git et exclu du contexte de build. Compose
+monte ce fichier dans les deux services ; l'API et PostgreSQL le lisent via leurs
+variables `_FILE`. Ce fichier reste en clair sur la machine : ce mécanisme évite
+le mot de passe dans l'image ou les variables d'environnement, sans le chiffrer.
+Conserver le même secret tant que le volume existe : PostgreSQL l'utilise lors
+de l'initialisation, pas pour changer automatiquement un mot de passe existant.
 
-## 2. Tableau comparatif Avant / Après
+Pour démarrer l'API déjà publiée, après avoir créé le secret :
+
+```powershell
+$env:API_IMAGE = "ghcr.io/adriencambier1/tp-docker-m2-api:1.0.0"
+docker compose up -d --no-build --wait --wait-timeout 120
+docker compose run --rm --no-deps tests
+docker compose down
+Remove-Item Env:API_IMAGE
+```
+
+Compose utilise directement l'image PostgreSQL Chainguard épinglée par digest.
+Le package DB public est une copie de cette même image.
+
+## 2. Comparaison avant / après
+
+La colonne « avant » reprend les mesures du durcissement initial. La colonne
+« après » a été vérifiée sur le build local nettoyé le 8 octobre 2026.
+Les tailles sont celles affichées par Docker ; les CVE dépendent de la date du scan.
 
 | Critère | API avant | API après | DB avant | DB après |
-|---------|-----------|-----------|----------|----------|
-| Image | `python:3.10-slim` (tag mouvant) | `cgr.dev/chainguard/python@sha256:b624…` | `postgres:14-alpine` (tag mouvant) | `cgr.dev/chainguard/postgres@sha256:0c4e…` |
-| Poids | 223 Mo | **128 Mo** (−43 %) | 415 Mo | 540 Mo ¹ |
-| Utilisateur | root (UID 0) | **nonroot (65532)** | root puis `gosu` | **postgres (70)** dès le démarrage |
-| Shell | oui (`sh`, `bash`, `apt`, `pip`) | **non** (ni `sh`, ni `ls`, ni `pip`, ni `apk`) | oui | oui ² |
-| CVE Trivy (total) | 185 (47 HIGH) | **0** | 47 (1 CRITICAL, 22 HIGH) | **0** |
-| CVE corrigeables HIGH/CRIT | 3 (+ 20 Python au total) | **0** | 22 | **0** |
-| Efficience Dive | 97,36 % (5,7 Mo gaspillés) | **99,73 %** (237 ko) | — | — |
-| Port exposé | 5000 sur toutes interfaces | `127.0.0.1:5000` | 5432 sur toutes interfaces | **aucun** (réseau interne) |
-| Contenu `/app` | `.git`, tests, compose (mots de passe), Dockerfile… | `app.py` + dépendances | — | — |
+|---|---|---|---|---|
+| Base | `python:3.10-slim` | Chainguard Python, digest fixé | `postgres:14-alpine` | Chainguard PostgreSQL, digest fixé |
+| Taille | 223 Mo | 122 Mo | 415 Mo | 540 Mo |
+| Utilisateur | root | UID 65532 | root puis `gosu` | UID 70 dès le démarrage |
+| Shell | présent | absent | présent | présent |
+| CVE Trivy, toutes sévérités | 185, dont 47 HIGH | 0 | 47, dont 1 CRITICAL et 22 HIGH | 0 |
+| Efficience Dive | 97,36 % | 99,71 % | — | — |
+| Port publié | 5000, toutes interfaces | `127.0.0.1:5000` | 5432, toutes interfaces | aucun |
+| Contenu de `/app` | code, Git, tests et configuration | `app.py` et dépendances runtime | — | — |
 
-¹ L'image Chainguard Postgres gratuite (`latest`) embarque PostgreSQL 18 complet
-(extensions, outils client) : plus lourde, mais 0 CVE contre 47.
-² Le script d'entrée officiel `docker-entrypoint.sh` (initdb, gestion des secrets
-`_FILE`) nécessite bash ; la surface est compensée par `read_only`, `cap_drop: ALL`,
-`no-new-privileges`, UID 70 et l'absence de port publié.
+La base Chainguard PostgreSQL est plus lourde que l'ancienne image Alpine, mais
+elle est imposée par le sujet. Son script d'entrée utilise un shell pour
+initialiser la base et lire le secret ; la contrainte sans shell concerne l'API.
 
----
+## 3. Images de base et reproductibilité
 
-## 3. Justification des images de base
+L'API utilise Chainguard Python, une des bases autorisées par le sujet. Le builder
+`latest-dev` contient pip ; le runtime `latest` ne contient ni shell, ni compilateur,
+ni gestionnaire de paquets. Les deux images utilisent Python 3.14 et Wolfi.
+Le runtime s'exécute en utilisateur non privilégié.
 
-**API — Chainguard Python** (`cgr.dev/chainguard/python`), autorisée par le sujet
-au même titre que Google Distroless. Les deux ont été mesurées :
+Les deux `FROM` et l'image PostgreSQL sont fixés par digest SHA256. Les tags
+`latest` et `latest-dev` servent de repères ; le digest détermine l'image utilisée.
+La CI refuse un `FROM` sans digest. L'image de test, Hadolint, Dive et Trivy
+utilisent également des images fixées par digest.
 
-| Base | Taille | CVE | Python |
-|------|--------|-----|--------|
-| `gcr.io/distroless/python3-debian13:nonroot` | 90,5 Mo | 159 (30 HIGH, non corrigées par Debian) | 3.13.5 |
-| `cgr.dev/chainguard/python:latest` | 100,9 Mo | **0** | 3.14.8 |
+`requirements.txt` fixe les versions des dépendances directes et transitives.
+Il est copié avant le code pour réutiliser la couche d'installation lorsque seul
+`app.py` change. L'installation utilise `--no-cache-dir --no-compile` : pas de cache
+pip ni de fichiers `.pyc` dans les dépendances copiées. Seuls le code et les
+bibliothèques nécessaires passent dans l'image finale. `.dockerignore` autorise
+uniquement `app.py` et `requirements.txt` dans le contexte utile du build.
 
-Chainguard l'emporte : distroless (pas de shell, de gestionnaire de paquets ni de
-coreutils), utilisateur `nonroot` par défaut, reconstruite quotidiennement sur
-Wolfi → 0 CVE. Le builder `:latest-dev` est la même image + pip/shell : même
-Python et même libc, donc wheels compatibles ABI.
+## 4. Sondes et fonctionnement sans shell
 
-**DB — Chainguard Postgres**, imposée par le sujet : 0 CVE contre 47 pour
-`postgres:14-alpine` (dont 1 CRITICAL dans le binaire Go `gosu`).
+La sonde de l'API est définie une seule fois dans le Dockerfile, puis héritée par
+Compose. Elle appelle directement Python, en forme exec :
 
-**Immuabilité et reproductibilité**
-- toutes les images (`FROM` du Dockerfile, `Dockerfile.test`, `image:` du compose,
-  outils CI Hadolint/Trivy/Dive) sont **épinglées par digest SHA256** ; le tag
-  (`latest`, seul tag gratuit chez Chainguard) n'est qu'indicatif, le digest fait foi ;
-- un contrôle CI échoue si un `FROM` n'a pas de `@sha256:` (Hadolint ne le détecte pas) ;
-- toutes les dépendances Python sont épinglées en `==` ;
-- la mise à jour des digests est un acte explicite (commit revu), ce qui permet de
-  suivre les nouvelles images Chainguard sans dérive silencieuse.
-
----
-
-## 4. Résolution des contraintes sans shell
-
-Dans une image distroless, `HEALTHCHECK CMD curl …` ou `CMD-SHELL` échouent : il
-n'y a ni `/bin/sh` ni `curl`. Les sondes sont donc en **forme exec** et utilisent
-ce que l'image contient déjà.
-
-**API** (Dockerfile et compose) :
-```yaml
-test: ["CMD", "/usr/bin/python", "-c",
-       "import sys, urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=3).status == 200 else 1)"]
+```dockerfile
+HEALTHCHECK --interval=10s --timeout=5s --start-period=10s --retries=5 \
+    CMD ["/usr/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=3)"]
 ```
-L'interpréteur Python du runtime et `urllib` (bibliothèque standard) font une
-requête HTTP sur `/health` ; toute exception (refus de connexion, timeout, 5xx)
-donne un code de sortie ≠ 0.
 
-**PostgreSQL** :
+`urllib.request` est fourni par Python. Une erreur HTTP ou réseau fait échouer la
+sonde, sans installer curl ou ajouter un shell.
+
+La sonde PostgreSQL appelle directement `pg_isready`, fourni par l'image :
+
 ```yaml
 test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "${POSTGRES_USER:-appuser}", "-d", "${POSTGRES_DB:-appdb}"]
 ```
-`pg_isready`, client fourni par l'image, appelé directement (les variables sont
-interpolées par Compose, pas par un shell).
 
-**Synchronisation** : `depends_on: db: condition: service_healthy` (+ `restart: true`) —
-l'API ne démarre qu'après la validation de la sonde PostgreSQL ; le service `tests`
-attend lui-même que l'API soit `healthy`.
+`depends_on` avec `service_healthy` attend PostgreSQL avant de démarrer l'API.
+`docker compose up --wait` attend ensuite les deux sondes avant les tests.
+Le test `/dbtest` vérifie une vraie connexion avec authentification et `SELECT 1`.
+Les tests fournis importent `app.py` et utilisent `app.test_client()`. Le service
+`tests` partage les paramètres de connexion et le secret avec l'API ; il installe
+les dépendances runtime et de test dans un tmpfs et lit le dépôt en lecture seule.
+Ce tmpfs autorise le chargement des bibliothèques natives de psycopg2 (`exec`).
+Son image Python de développement dispose de pip et d'un shell, contrairement
+au runtime de production. La CI interroge aussi `/health` et `/dbtest` en HTTP
+sur l'API démarrée, pour vérifier l'image qui sera publiée.
 
-Autres adaptations au runtime minimal : `read_only: true` avec `tmpfs` pour `/tmp`
-et le socket PostgreSQL, gunicorn avec `--worker-tmp-dir /dev/shm`,
-`PYTHONDONTWRITEBYTECODE=1`, volume monté sur `/var/lib/postgresql` (propriété
-UID 70 dans l'image) pour que `initdb` fonctionne sans capability `CHOWN`.
+PostgreSQL rejoint uniquement le réseau interne `backend`. Les deux services
+ont un système de fichiers en lecture seule, aucune capability Linux et
+`no-new-privileges`. Les écritures temporaires utilisent des tmpfs ; les données
+PostgreSQL utilisent un volume monté sur `/var/lib/postgresql`, appartenant à
+l'UID 70. Gunicorn utilise `/dev/shm` pour ses fichiers temporaires.
 
----
+## 5. Remédiations des dépendances et du code
 
-## 5. Journal des remédiations de dépendances & qualité
+Les vulnérabilités relevées lors du durcissement initial ont motivé ces changements :
 
-**Flake8** — le code passait la config d'équipe uniquement parce qu'elle ignore
-`E302, W293, W292, W391`. Corrigé quand même : 2 lignes vides entre définitions
-(8× E302), espaces sur ligne vide (W293), ligne vide finale (W391), saut de ligne
-final manquant (W292), 2× E501 introduits puis corrigés. `flake8` et
-`flake8 --isolated` sont vierges.
+| Dépendance | Avant | Version retenue | Remédiation |
+|---|---|---|---|
+| Werkzeug | 2.3.3 | 3.1.9 | CVE-2024-34069 HIGH et plusieurs CVE MEDIUM |
+| Flask | 2.3.2 | 3.1.3 | CVE-2026-27205 LOW |
+| pytest | 7.4.0 | 9.1.1 | CVE-2025-71176 MEDIUM ; déplacé hors du runtime |
+| psycopg2-binary | non fixé | 2.9.13 | version fixée, compatible avec le runtime testé |
+| Gunicorn | absent | 26.2.0 | serveur WSGI à la place du serveur de développement Flask |
 
-**Vulnérabilités du `requirements.txt` d'origine** (Trivy) :
+Les outils du builder, notamment pip, setuptools et wheel, ne sont pas copiés
+dans le runtime. Les dépendances transitives sont également fixées pour éviter
+que leur version change entre deux installations du même fichier.
 
-| Paquet | Version | CVE | Sévérité |
-|--------|---------|-----|----------|
-| Werkzeug | 2.3.3 | CVE-2024-34069 | **HIGH** |
-| Werkzeug | 2.3.3 | CVE-2023-46136, CVE-2024-49766, CVE-2024-49767, CVE-2025-66221, CVE-2026-21860, CVE-2026-27199, CVE-2026-102598 | MEDIUM |
-| Flask | 2.3.2 | CVE-2026-27205 | LOW |
-| pytest | 7.4.0 | CVE-2025-71176 | MEDIUM |
-| psycopg2-binary | non épinglé | build non reproductible | — |
+Le code respecte la configuration Flake8 fournie. Les espaces inutiles, lignes
+vides et fins de fichier ont été corrigés. Le mot de passe par défaut a été
+supprimé, la connexion a un délai maximal de cinq secondes et `/dbtest` renvoie
+un message neutre en cas d'échec, avec les détails dans les logs.
 
-Plus, dans l'image `python:3.10-slim` : `wheel` (CVE-2026-24049, HIGH),
-`jaraco.context` (CVE-2026-23949, HIGH), `pip` (7 CVE), `setuptools` (1 CVE).
+`test_app.py` conserve la fixture Flask et les trois tests fournis dans le sujet ;
+seuls les espaces entre les fonctions sont normalisés. `requirements.txt` contient
+uniquement les dépendances de l'application. Le service de tests installe
+`pytest==9.1.1` séparément ; la CI installe `flake8==7.4.1` dans son job de lint.
+Ces outils ne sont pas installés dans l'image de production.
 
-**Montées de version** :
-- `Flask 2.3.2 → 3.1.3` et `Werkzeug 2.3.3 → 3.1.9` : dernières versions, corrigent
-  toutes les CVE ; aucune API dépréciée n'est utilisée par l'application ;
-- `psycopg2-binary → ==2.9.13` : épinglé, wheel Python 3.14, compatible PostgreSQL 18 ;
-- `pytest 7.4.0 → 9.1.1` déplacé dans `requirements-dev.txt` (hors production) ;
-- ajout de `gunicorn==26.2.0` (serveur WSGI de production) ;
-- `pip`, `setuptools`, `wheel` disparaissent de l'image finale (runtime sans pip).
+## 6. CI/CD et publication
 
-Durcissements applicatifs : mot de passe lu depuis un secret fichier
-(`DB_PASSWORD_FILE`), plus de mot de passe par défaut dans le code, `/dbtest`
-ne renvoie plus le message d'exception au client, `connect_timeout=5`.
+Les six jobs correspondent aux étapes demandées :
 
----
+```text
+Flake8 + Hadolint → BuildKit / Dive → Trivy + intégration → publication GHCR
+```
 
-## 6. Sécurisation de la chaîne CI/CD
+Flake8 et Hadolint bloquent le build. Dive impose au moins 80 % d'efficience.
+Trivy scanne l'API, les dépendances du dépôt et PostgreSQL ; une vulnérabilité
+HIGH ou CRITICAL disposant d'une correction fait échouer le job.
+L'intégration démarre Compose, vérifie les routes en HTTP puis exécute les trois
+tests pytest fournis dans le service temporaire. La publication attend la réussite
+de ces contrôles.
 
-**Permissions minimales** : `permissions: {}` au niveau du workflow ; chaque job
-reçoit `contents: read` ; seul `release` a `packages: write`. Connexion à GHCR
-avec le `GITHUB_TOKEN` éphémère du workflow (aucun PAT stocké).
-`persist-credentials: false` sur chaque checkout. Les pull requests ne publient rien.
+Le workflow ferme les permissions par défaut. Les jobs de lecture ont
+`contents: read` ; seul celui de publication a `packages: write`. Il utilise
+`GITHUB_TOKEN`, sans jeton personnel. Toutes les actions sont fixées par SHA
+complet et les checkouts n'enregistrent pas les identifiants Git.
+Les pull requests exécutent les contrôles sans publier.
 
-**Pinning SHA** : chaque action est référencée par SHA de commit complet (version
-en commentaire) — un tag Git peut être déplacé par un attaquant (cas de la
-compromission des tags de `aquasecurity/trivy-action` en 2026), un SHA non.
-Hadolint, Trivy et Dive tournent depuis des images Docker épinglées par digest.
+L'API est construite une seule fois, puis transférée entre les jobs par
+`docker save` / `docker load`. La publication réutilise l'image testée et scannée.
+Le digest PostgreSQL est lu dans Compose pour scanner et publier la même base.
 
-**Barrières** : `flake8` ∥ `hadolint` → `build` (Dive ≥ 80 %) → `trivy` ∥
-`integration` → `release`. Chaque étape échoue avec un code ≠ 0 ; `release`
-dépend de tous les jobs. L'image publiée est l'artefact exact qui a été scanné et
-testé (`docker save`/`docker load`, pas de rebuild).
+Un push sur `main` publie `edge` et `sha-<commit>`. Un tag `vX.Y.Z` publie
+`X.Y.Z`, `X.Y`, `X`, `latest` et `sha-<commit>` ; le tag majeur `0` est omis.
+Pour une prochaine version, après avoir commité les changements :
 
-**SemVer** (`docker/metadata-action`) : un tag `vX.Y.Z` publie `X.Y.Z`, `X.Y`,
-`X` et `latest` (le tag majeur `0` est désactivé pour les versions `0.x`, instables par définition) ; chaque push sur `main`
-publie `edge` + `sha-<commit>` pour la traçabilité. Les images restent tirables
-par digest pour un déploiement immuable.
-
----
+```powershell
+git push origin main
+git tag v1.0.1
+git push origin v1.0.1
+```
 
 ## 7. Preuves d'exécution
 
-Sorties obtenues en local (Docker 29.8.2) ; les mêmes commandes tournent en CI.
+Vérifications locales du projet nettoyé, le 8 octobre 2026 :
 
-**Flake8**
-```
-$ flake8 --config .flake8 .
-$ echo $?
-0
-```
+| Contrôle | Résultat |
+|---|---|
+| Flake8 | code de sortie 0 |
+| Hadolint | code de sortie 0 |
+| Configuration Compose | valide ; API et DB au démarrage, tests dans un profil facultatif |
+| Actionlint et ShellCheck du workflow | code de sortie 0 |
+| Build multi-stage | réussi |
+| Runtime API | UID 65532 ; aucun shell, pip ou compilateur ; aucun `.pyc` dans les dépendances |
+| Dive | 99,7126 % ; seuil de 80 % validé ; 237 208 octets gaspillés |
+| Trivy API / dépendances / DB | 0 vulnérabilité, toutes sévérités |
+| Compose sur un volume neuf | API et PostgreSQL `healthy` |
+| Tests pytest fournis | 3 réussis en 0,23 s, sans avertissement de marqueur |
+| Smoke test HTTP | `/health` et `/dbtest` répondent avec un statut 200 |
 
-**Hadolint**
-```
-$ hadolint --config .hadolint.yaml Dockerfile Dockerfile.test
-$ echo $?
-0
-```
+Les tests fournis ont été revérifiés avec un projet Compose distinct, un volume
+neuf et le port HTTP 15001. Le conteneur de tests reste sur les réseaux Compose :
+il contacte PostgreSQL via `db:5432`, sans publier le port de la base.
 
-**Dive**
-```
-$ CI=true dive tp-docker-m2-api:local --ci-config .dive-ci
-  efficiency: 99.7266 %
-  wastedBytes: 237208 bytes (237 kB)
-  userWastedPercent: 0.4756 %
-  PASS: highestUserWastedPercent
-  SKIP: highestWastedBytes: rule disabled
-  PASS: lowestEfficiency
-Result:PASS [Total:3] [Passed:2] [Failed:0] [Warn:0] [Skipped:1]
+```powershell
+docker compose run --rm --no-deps tests
+# test_health PASSED, test_hello PASSED, test_dbtest PASSED
+# 3 passed in 0.23s
 ```
 
-**Trivy**
-```
-$ trivy image --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 tp-api:after
-│ tp-api:after (wolfi 20230201)                               │   wolfi    │        0        │
-│ app/site-packages/flask-3.1.3.dist-info/METADATA            │ python-pkg │        0        │
-│ app/site-packages/werkzeug-3.1.9.dist-info/METADATA         │ python-pkg │        0        │
-│ app/site-packages/psycopg2_binary-2.9.13.dist-info/METADATA │ python-pkg │        0        │
-│ app/site-packages/gunicorn-26.2.0.dist-info/METADATA        │ python-pkg │        0        │
-exit=0
-$ trivy fs --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 .
-│ requirements.txt │ pip │ 0 │
-$ trivy image cgr.dev/chainguard/postgres@sha256:0c4e…   -> 0 vulnérabilité
-```
-
-**Compose — état sain**
-```
-$ docker compose up -d --wait --wait-timeout 120
- Container tp-docker-m2-db-1  Healthy
- Container tp-docker-m2-api-1 Healthy
-$ docker compose ps
-api   Up (healthy)   127.0.0.1:5000->5000/tcp
-db    Up (healthy)
-$ curl http://127.0.0.1:5000/health   {"status":"ok"}
-$ curl http://127.0.0.1:5000/dbtest   {"db_connection":"successful"}
-```
-
-**Tests d'intégration**
-```
-$ docker compose --profile test run --rm tests
-test_app.py::test_health PASSED                                          [ 33%]
-test_app.py::test_hello PASSED                                           [ 66%]
-test_app.py::test_dbtest PASSED                                          [100%]
-============================== 3 passed in 0.22s ===============================
-```
-
-**Publication GHCR** : voir l'onglet *Actions* du dépôt (job `Release GHCR`) et
-les packages listés en section 1.
+La [CI de la version 1.0.0](https://github.com/AdrienCambier1/tp-docker-m2/actions/runs/37759486337)
+prouve la publication précédente. Le workflow nettoyé est validé localement ;
+son exécution sur GitHub et la publication du nouveau build nécessitent de
+commiter et pousser ces modifications.

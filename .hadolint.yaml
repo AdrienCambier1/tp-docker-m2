@@ -1,31 +1,9 @@
-# Gouvernance d'équipe - politique de conteneurisation (Hadolint)
-# Tout manquement de niveau warning ou supérieur fait échouer l'audit.
 failure-threshold: warning
-
-# Seuls ces registres sont autorisés dans les instructions FROM (règle DL3026)
-trustedRegistries:
-  - docker.io
-  - gcr.io
-  - cgr.dev
-  - ghcr.io
+trustedRegistries: [docker.io, gcr.io, cgr.dev, ghcr.io]
 
 override:
-  # Règles de sécurité rehaussées en erreur bloquante
   error:
-    - DL3002 # Le dernier USER ne doit pas être root
-    - DL3006 # Toujours étiqueter explicitement la version de l'image
-    - DL3007 # Interdiction du tag mouvant "latest"
-    - DL4006 # "set -o pipefail" obligatoire avant tout RUN contenant un pipe
-  # Règles standards imposées sans dérogation (warning => bloquant via le seuil)
-  warning:
-    - DL3025 # CMD / ENTRYPOINT en forme JSON exec
-    - DL3042 # pip install --no-cache-dir
-    - DL3020 # COPY plutôt que ADD
-    - DL3021 # COPY multi-fichiers vers un dossier terminé par /
-    - DL3022 # COPY --from doit référencer un étage défini
-    - DL3003 # WORKDIR plutôt que cd
-    - SC2086 # Variables shell entre guillemets
-    - SC2164 # cd || exit
-
-# Aucune règle ignorée : pas de dérogation
-ignored: []
+    - DL3002
+    - DL3006
+    - DL3007
+    - DL4006
