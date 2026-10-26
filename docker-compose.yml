@@ -7,7 +7,10 @@ x-hardening: &hardening
 
 services:
   api:
-    build: .
+    build:
+      context: .
+      target: runtime
+      secrets: [pip_token]
     image: ${API_IMAGE:-tp-docker-m2-api:local}
     <<: *hardening
     environment: &db-connection
@@ -27,7 +30,7 @@ services:
     pids_limit: 100
 
   db:
-    image: cgr.dev/chainguard/postgres@sha256:0c4eaf6cb9bd65337d834f5ebfe79add4312ee2125ab584bf1fbc071abc6bb8f
+    image: cgr.dev/chainguard/postgres@sha256:b32c0efe4c15bbc08fcd801f619a7d98d44f3f8eca3ec89efad4941a56e8741c
     <<: *hardening
     user: "70:70"
     environment:
@@ -63,7 +66,7 @@ services:
 
   tests:
     profiles: [test]
-    image: cgr.dev/chainguard/python:latest-dev@sha256:894aed3297d91283e1fc4c542f5374a4b5f3726134fda7c94eaa539342be1e05
+    image: cgr.dev/chainguard/python:latest-dev@sha256:dde1a2549dd62864f0263dae8e877680837b4e738a7ecc85c671c55c069848ac
     <<: *hardening
     user: "65532:65532"
     working_dir: /work
@@ -95,3 +98,5 @@ volumes:
 secrets:
   db_password:
     file: ./secrets/db_password.txt
+  pip_token:
+    file: ./secrets/pip_token.txt

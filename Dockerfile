@@ -1,13 +1,21 @@
-FROM cgr.dev/chainguard/python:latest-dev@sha256:894aed3297d91283e1fc4c542f5374a4b5f3726134fda7c94eaa539342be1e05 AS builder
+# syntax=docker/dockerfile:1.28.0@sha256:bb22d9815c728170f72750f4e5b0d672e06176142e1d602c7e66c050100b7e5b
+
+FROM cgr.dev/chainguard/python:latest-dev@sha256:dde1a2549dd62864f0263dae8e877680837b4e738a7ecc85c671c55c069848ac AS builder
+
+ENV PIP_CACHE_DIR=/home/nonroot/.cache/pip \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 WORKDIR /build
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir --no-compile --target=/build/install -r requirements.txt \
+RUN --mount=type=cache,id=pip-cache,target=/home/nonroot/.cache/pip,uid=65532,gid=65532,sharing=locked \
+    --mount=type=secret,id=pip_token,required=true,uid=65532,gid=65532,mode=0400 \
+    test -s /run/secrets/pip_token \
+    && pip install --no-compile --target=/build/install -r requirements.txt \
     && rm -rf /build/install/bin
 COPY app.py .
 
-FROM cgr.dev/chainguard/python:latest@sha256:b6248c85ba9b97e1e61b30197f309cc4d21661f889fefa5268f0a7bc530dad46 AS runtime
+FROM cgr.dev/chainguard/python:latest@sha256:49fd266eb8a1331194c318b742087c7a2939cc5794fa64f17feb9e17e12703e2 AS runtime
 
 ENV PYTHONPATH=/app/site-packages \
     PYTHONDONTWRITEBYTECODE=1 \

@@ -69,23 +69,37 @@ jobs:
           image=$(docker compose config --format json | python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["db"]["image"])')
           [[ "$image" =~ ^cgr\.dev/chainguard/postgres@sha256:[a-f0-9]{64}$ ]]
           echo "image=$image" >> "$GITHUB_OUTPUT"
+      - name: Jeton de build simulé
+        env:
+          PIP_TOKEN: ${{ secrets.PIP_TOKEN }}
+        run: |
+          mkdir -p secrets
+          if [ -z "$PIP_TOKEN" ]; then
+            PIP_TOKEN="ghp_$(openssl rand -hex 18)"
+          fi
+          echo "::add-mask::$PIP_TOKEN"
+          printf '%s' "$PIP_TOKEN" > secrets/pip_token.txt
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
-      - name: Build API
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc
+      - name: Build API (bake, amd64)
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e
         with:
-          context: .
-          tags: ${{ env.API_IMAGE }}
-          load: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
+          files: docker-bake.hcl
+          targets: api-ci
+      - name: Aucune trace du jeton dans l'image
+        run: |
+          token=$(cat secrets/pip_token.txt)
+          docker save "$API_IMAGE" -o api-image.tar
+          if docker history --no-trunc "$API_IMAGE" | grep -qF "$token" \
+            || docker image inspect "$API_IMAGE" | grep -qF "$token" \
+            || grep -aqF "$token" api-image.tar; then
+            echo "::error::Le jeton de build est présent dans l'image."
+            exit 1
+          fi
+          rm -f secrets/pip_token.txt
       - name: Dive (efficience >= 80 %)
         run: |
           docker run --rm -e CI=true -v /var/run/docker.sock:/var/run/docker.sock \
             -v "$PWD/.dive-ci":/.dive-ci:ro "$DIVE_IMAGE" --ci-config /.dive-ci "$API_IMAGE"
-      - run: docker save "$API_IMAGE" -o api-image.tar
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
         with:
           name: api-image
@@ -110,7 +124,7 @@ jobs:
       - name: Trivy (HIGH et CRITICAL corrigeables)
         run: |
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v trivy-cache:/root/.cache \
-            "$TRIVY_IMAGE" image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$API_IMAGE"
+            "$TRIVY_IMAGE" image --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$API_IMAGE"
           docker run --rm -v "$PWD":/work:ro -v trivy-cache:/root/.cache \
             "$TRIVY_IMAGE" fs --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 /work
           docker run --rm -v trivy-cache:/root/.cache \
@@ -158,14 +172,18 @@ jobs:
     env:
       DB_IMAGE: ${{ needs.build.outputs.db-image }}
     steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          name: api-image
-      - run: docker load -i api-image.tar
+          persist-credentials: false
       - name: Noms des packages
         run: |
-          echo "GHCR_API=ghcr.io/${GITHUB_REPOSITORY,,}-api" >> "$GITHUB_ENV"
-          echo "GHCR_DB=ghcr.io/${GITHUB_REPOSITORY,,}-db" >> "$GITHUB_ENV"
+          repo="${GITHUB_REPOSITORY,,}"
+          {
+            echo "REGISTRY=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}"
+            echo "IMAGE=${repo#*/}-api"
+            echo "GHCR_API=ghcr.io/${repo}-api"
+            echo "GHCR_DB=ghcr.io/${repo}-db"
+          } >> "$GITHUB_ENV"
       - uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302
         id: meta
         with:
@@ -181,16 +199,44 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069
-      - name: Publier les images validées
+      - name: Jeton de build simulé
         env:
-          TAGS: ${{ steps.meta.outputs.tags }}
+          PIP_TOKEN: ${{ secrets.PIP_TOKEN }}
+        run: |
+          mkdir -p secrets
+          if [ -z "$PIP_TOKEN" ]; then
+            PIP_TOKEN="ghp_$(openssl rand -hex 18)"
+          fi
+          echo "::add-mask::$PIP_TOKEN"
+          printf '%s' "$PIP_TOKEN" > secrets/pip_token.txt
+      - name: Tags pour bake
+        env:
+          META_TAGS: ${{ steps.meta.outputs.tags }}
+          META_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          echo "TAGS=$(sed '/^$/d; s/.*://' <<< "$META_TAGS" | paste -sd, -)" >> "$GITHUB_ENV"
+          echo "VERSION=$META_VERSION" >> "$GITHUB_ENV"
+      - name: Build et push multi-architecture (bake)
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e
+        with:
+          files: docker-bake.hcl
+          targets: api
+          push: true
+      - name: Index amd64 + arm64
+        run: |
+          docker buildx imagetools inspect "${GHCR_API}:${VERSION}"
+          platforms=$(docker buildx imagetools inspect "${GHCR_API}:${VERSION}" --format '{{json .Manifest}}' | python3 -c 'import json,sys; print(" ".join(sorted(m["platform"]["architecture"] for m in json.load(sys.stdin)["manifests"] if m["platform"]["os"] != "unknown")))')
+          echo "$platforms"
+          [ "$platforms" = "amd64 arm64" ]
+      - name: Publier l'image PostgreSQL
+        env:
+          TAGS_LIST: ${{ steps.meta.outputs.tags }}
         run: |
           db_tags=()
           while IFS= read -r tag; do
             [ -n "$tag" ] || continue
-            docker tag "$API_IMAGE" "$tag"
-            docker push "$tag"
             db_tags+=(-t "${GHCR_DB}:${tag##*:}")
-          done <<< "$TAGS"
+          done <<< "$TAGS_LIST"
           docker buildx imagetools create "${db_tags[@]}" "$DB_IMAGE"
