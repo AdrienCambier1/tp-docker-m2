@@ -20,6 +20,10 @@ env:
   HADOLINT_IMAGE: hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d
   TRIVY_IMAGE: aquasec/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
   DIVE_IMAGE: wagoodman/dive:v0.13.1@sha256:f1886e6c32c094fc41a623c1989f5cb3e48aa766da5f0be233f911fc1d85ce10
+  SYFT_IMAGE: anchore/syft:v1.55.0@sha256:4cc92b64ca74ffca4c94d4c8fcc01f217731375300be14d0b6eeb2e82eaa110a
+  GRYPE_IMAGE: anchore/grype:v0.121.0@sha256:621d56d1d68106b787022c81546f7e0a36202a25d1239f0c20195fab8c16f7ea
+  COSIGN_VERSION: v3.1.4
+  OIDC_ISSUER: https://token.actions.githubusercontent.com
 
 jobs:
   flake8:
@@ -106,7 +110,7 @@ jobs:
           path: api-image.tar
           retention-days: 1
 
-  trivy:
+  supply-chain:
     runs-on: ubuntu-latest
     needs: [build]
     permissions:
@@ -121,18 +125,45 @@ jobs:
         with:
           name: api-image
       - run: docker load -i api-image.tar
-      - name: Trivy (HIGH et CRITICAL corrigeables)
+      - name: SBOM CycloneDX et SPDX (Syft, analyse statique)
         run: |
-          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v trivy-cache:/root/.cache \
-            "$TRIVY_IMAGE" image --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$API_IMAGE"
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD":/out "$SYFT_IMAGE" \
+            "docker:$API_IMAGE" -q -o cyclonedx-json=/out/sbom.cdx.json -o spdx-json=/out/sbom.spdx.json
+      - name: Statistiques du SBOM
+        run: |
+          {
+            echo "### SBOM"
+            echo "- Composants CycloneDX (hors fichiers) : $(jq '[.components[] | select(.type != "file")] | length' sbom.cdx.json)"
+            echo "- Paquets SPDX : $(jq '.packages | length' sbom.spdx.json)"
+            echo "- PURL : $(jq '[.components[] | select(.purl)] | length' sbom.cdx.json)"
+            echo "- Licences : $(jq -r '[.components[].licenses[]? | .license.id // .license.name // .expression] | unique | join(", ")' sbom.cdx.json)"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: sbom
+          path: |
+            sbom.cdx.json
+            sbom.spdx.json
+      - name: Trivy (HIGH et CRITICAL corrigeables, VEX)
+        run: |
+          docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v trivy-cache:/root/.cache -v "$PWD":/work:ro \
+            "$TRIVY_IMAGE" image --scanners vuln,secret --severity HIGH,CRITICAL --ignore-unfixed \
+            --vex /work/security.vex.json --exit-code 1 "$API_IMAGE"
           docker run --rm -v "$PWD":/work:ro -v trivy-cache:/root/.cache \
             "$TRIVY_IMAGE" fs --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 /work
           docker run --rm -v trivy-cache:/root/.cache \
             "$TRIVY_IMAGE" image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 "$DB_IMAGE"
+      - name: Grype sur le SBOM filtré par VEX
+        run: |
+          docker run --rm -v "$PWD":/work:ro -w /work -v grype-db:/grype-db -e GRYPE_DB_CACHE_DIR=/grype-db \
+            "$GRYPE_IMAGE" sbom:/work/sbom.cdx.json -c /work/.grype.yaml
+          docker run --rm -v "$PWD":/work:ro -w /work -v grype-db:/grype-db -e GRYPE_DB_CACHE_DIR=/grype-db \
+            -e GRYPE_DB_AUTO_UPDATE=false "$GRYPE_IMAGE" sbom:/work/sbom.cdx.json -c /work/.grype.yaml -o json \
+            | jq -r '.ignoredMatches[]? | "\(.vulnerability.id) \(.artifact.name) -> \(.appliedIgnoreRules | map(."vex-status" // ."fix-state") | join(","))"'
 
   integration:
     runs-on: ubuntu-latest
-    needs: [build]
+    needs: [supply-chain]
     permissions:
       contents: read
     steps:
@@ -164,13 +195,18 @@ jobs:
 
   release:
     runs-on: ubuntu-latest
-    needs: [build, trivy, integration]
+    needs: [build, integration]
     if: github.event_name == 'push'
     permissions:
       contents: read
       packages: write
+      id-token: write
     env:
       DB_IMAGE: ${{ needs.build.outputs.db-image }}
+    outputs:
+      image: ${{ steps.digest.outputs.image }}
+      digest: ${{ steps.digest.outputs.digest }}
+      platform-digests: ${{ steps.digest.outputs.platform-digests }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -224,12 +260,43 @@ jobs:
           files: docker-bake.hcl
           targets: api
           push: true
-      - name: Index amd64 + arm64
+      - run: rm -f secrets/pip_token.txt
+      - name: Digest immuable de l'index
+        id: digest
         run: |
-          docker buildx imagetools inspect "${GHCR_API}:${VERSION}"
-          platforms=$(docker buildx imagetools inspect "${GHCR_API}:${VERSION}" --format '{{json .Manifest}}' | python3 -c 'import json,sys; print(" ".join(sorted(m["platform"]["architecture"] for m in json.load(sys.stdin)["manifests"] if m["platform"]["os"] != "unknown")))')
-          echo "$platforms"
-          [ "$platforms" = "amd64 arm64" ]
+          manifest=$(docker buildx imagetools inspect "${GHCR_API}:${VERSION}" --format '{{json .Manifest}}')
+          digest=$(jq -r '.digest' <<< "$manifest")
+          platforms=$(jq -c '[.manifests[] | select(.platform.os == "linux") | {arch: .platform.architecture, digest}]' <<< "$manifest")
+          [ "$(jq -r 'map(.arch) | sort | join(" ")' <<< "$platforms")" = "amd64 arm64" ]
+          {
+            echo "image=${GHCR_API}"
+            echo "digest=${digest}"
+            echo "platform-digests=${platforms}"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "DIGEST=${digest}"
+            echo "PLATFORMS=${platforms}"
+          } >> "$GITHUB_ENV"
+          echo "Index publié : ${GHCR_API}:${VERSION}@${digest}" >> "$GITHUB_STEP_SUMMARY"
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+      - name: Signature sans clé (OIDC) de l'index et des variantes
+        run: cosign sign --yes --recursive "${GHCR_API}@${DIGEST}"
+      - name: SBOM des images publiées et attestations signées
+        run: |
+          for row in $(jq -r '.[] | "\(.arch)=\(.digest)"' <<< "$PLATFORMS"); do
+            arch="${row%%=*}"
+            ref="${GHCR_API}@${row#*=}"
+            docker run --rm -v "$PWD":/out "$SYFT_IMAGE" "registry:${ref}" -q \
+              -o "cyclonedx-json=/out/sbom-${arch}.cdx.json" -o "spdx-json=/out/sbom-${arch}.spdx.json"
+            cosign attest --yes --type cyclonedx --predicate "sbom-${arch}.cdx.json" "$ref"
+            cosign attest --yes --type spdxjson --predicate "sbom-${arch}.spdx.json" "$ref"
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: sbom-published
+          path: sbom-*.json
       - name: Publier l'image PostgreSQL
         env:
           TAGS_LIST: ${{ steps.meta.outputs.tags }}
@@ -240,3 +307,38 @@ jobs:
             db_tags+=(-t "${GHCR_DB}:${tag##*:}")
           done <<< "$TAGS_LIST"
           docker buildx imagetools create "${db_tags[@]}" "$DB_IMAGE"
+
+  verify:
+    runs-on: ubuntu-latest
+    needs: [release]
+    permissions:
+      packages: read
+    env:
+      IMAGE: ${{ needs.release.outputs.image }}
+      DIGEST: ${{ needs.release.outputs.digest }}
+      PLATFORMS: ${{ needs.release.outputs.platform-digests }}
+    steps:
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6
+        with:
+          cosign-release: ${{ env.COSIGN_VERSION }}
+      - name: Signature de l'index (registre distant)
+        run: |
+          cosign verify "${IMAGE}@${DIGEST}" \
+            --certificate-identity "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/ci-cd.yaml@${GITHUB_REF}" \
+            --certificate-oidc-issuer "$OIDC_ISSUER" > /dev/null
+      - name: Signatures et attestations SBOM de chaque architecture
+        run: |
+          identity="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/ci-cd.yaml@${GITHUB_REF}"
+          for row in $(jq -r '.[] | "\(.arch)=\(.digest)"' <<< "$PLATFORMS"); do
+            arch="${row%%=*}"
+            ref="${IMAGE}@${row#*=}"
+            cosign verify "$ref" --certificate-identity "$identity" --certificate-oidc-issuer "$OIDC_ISSUER" > /dev/null
+            for type in cyclonedx spdxjson; do
+              cosign verify-attestation "$ref" --type "$type" \
+                --certificate-identity "$identity" --certificate-oidc-issuer "$OIDC_ISSUER" > "att-${arch}-${type}.json"
+            done
+            components=$(jq -r '.payload' "att-${arch}-cyclonedx.json" | head -n 1 | base64 -d \
+              | jq '[.predicate.components[] | select(.type != "file")] | length')
+            [ "$components" -gt 0 ]
+            echo "- ${arch} : signature et attestations valides, ${components} composants" >> "$GITHUB_STEP_SUMMARY"
+          done
