@@ -1,19 +1,18 @@
-import logging
 import os
+from contextlib import closing
 
 import psycopg2
 from flask import Flask, jsonify
 
 app = Flask(__name__)
-logger = logging.getLogger(__name__)
 
 
-def read_secret(name, default=None):
+def read_secret(name):
     secret_file = os.getenv(f"{name}_FILE")
     if secret_file:
         with open(secret_file, encoding="utf-8") as f:
             return f.read().strip()
-    return os.getenv(name, default)
+    return os.getenv(name)
 
 
 DB_HOST = os.getenv("DB_HOST", "db")
@@ -34,7 +33,7 @@ def hello():
 
 
 def get_db_connection():
-    conn = psycopg2.connect(
+    return psycopg2.connect(
         host=DB_HOST,
         port=DB_PORT,
         dbname=DB_NAME,
@@ -42,26 +41,16 @@ def get_db_connection():
         password=DB_PASSWORD,
         connect_timeout=5,
     )
-    return conn
 
 
 @app.route("/dbtest")
 def db_test():
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        cur.execute("SELECT 1")
-        result = cur.fetchone()
-        cur.close()
-        conn.close()
-        if result:
+        with closing(get_db_connection()) as conn, closing(conn.cursor()) as cur:
+            cur.execute("SELECT 1")
+            result = cur.fetchone()
+        if result == (1,):
             return jsonify({"db_connection": "successful"})
-        else:
-            return jsonify({"db_connection": "failed"}), 500
-    except Exception:
-        logger.exception("Database connection failed")
-        return jsonify({"db_connection": "failed"}), 500
-
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=5000)
+    except psycopg2.Error:
+        app.logger.exception("Database connection failed")
+    return jsonify({"db_connection": "failed"}), 500

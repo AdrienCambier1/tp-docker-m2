@@ -13,16 +13,21 @@ docker pull ghcr.io/adriencambier1/tp-docker-m2-db:2.0.0
 Lancement et tests :
 
 ```bash
-mkdir -p secrets && openssl rand -hex 32 > secrets/db_password.txt
+mkdir -p secrets
+[ -s secrets/db_password.txt ] || openssl rand -hex 32 > secrets/db_password.txt
 API_IMAGE=ghcr.io/adriencambier1/tp-docker-m2-api:2.0.0 docker compose up -d --no-build --wait
 docker compose run --rm --no-deps tests
+docker compose down
 ```
 
 Build local (le jeton simulé `secrets/pip_token.txt` est obligatoire) :
 
 ```bash
+mkdir -p secrets
 printf 'ghp_%s' "$(openssl rand -hex 18)" > secrets/pip_token.txt
 docker buildx bake -f docker-bake.hcl api-ci
+# Après création de secrets/db_password.txt comme ci-dessus :
+API_IMAGE=tp-docker-m2-api:ci docker compose up -d --no-build --wait
 ```
 
 ## 2. Avant / Après
@@ -34,13 +39,13 @@ docker buildx bake -f docker-bake.hcl api-ci
 | Utilisateur | root | 65532 | root | 70 |
 | Shell | oui | non | oui | oui (script d'init) |
 | Architectures | amd64 | amd64 + arm64 | amd64 | amd64 + arm64 |
-| CVE Trivy | 185 (47 HIGH) | 0 | 47 (1 CRITICAL) | 0 |
-| Efficience Dive | 97,4 % | 99,7 % | — | — |
+| CVE Trivy | 185 (47 HIGH) | 0 HIGH/CRITICAL corrigeable | 47 (1 CRITICAL) | 0 HIGH/CRITICAL corrigeable |
+| Efficience Dive | 97,4 % | 97,63 % (99,71 % en 2.0.0) | — | — |
 
 ## 3. Images de base
 
-- **Chainguard Python** : runtime distroless sans shell, pip ni gestionnaire de paquets, non-root par défaut, 0 CVE (Google Distroless testé : 159 CVE Debian non corrigées).
-- **Chainguard Postgres** : imposé par le sujet, 0 CVE.
+- **Chainguard Python** : runtime distroless sans shell, non-root (Google Distroless testé : 159 CVE Debian non corrigées). Le Dockerfile supprime le module `ensurepip` et les roues de bootstrap pip hérités de la base, avec Python en forme exec. L'utilisateur root sert uniquement à ce nettoyage au build ; l'image finale revient à `65532:65532`.
+- **Chainguard Postgres** : imposé par le sujet. Le contrôle Trivy ne relève aucune CVE HIGH/CRITICAL corrigeable dans les deux images au 29/10/2026 ; le résultat dépend de la date et de la base d'audit.
 - **Reproductibilité** : images (Dockerfile, Compose, outils CI) et frontend `docker/dockerfile` épinglés par digest SHA256, dépendances Python en `==`. La CI refuse un `FROM` sans digest. Les digests sont remontés quand Trivy détecte une faille corrigée en amont (passage à Python 3.15 le 26/10).
 
 ## 4. Healthchecks sans shell
@@ -77,6 +82,7 @@ docker buildx bake -f docker-bake.hcl api-ci
 - **Épinglage** : actions par SHA de commit, outils (Hadolint, Trivy, Dive, Syft, Grype) par digest.
 - **SemVer** : `vX.Y.Z` publie `X.Y.Z`, `X.Y`, `X` et `latest` ; `main` publie `edge` et `sha-<commit>` ; les pull requests ne publient rien.
 - **Cosign sans clé** : pas de `cosign.pub`, l'identité OIDC du workflow est vérifiée (issuer `https://token.actions.githubusercontent.com`, identité `https://github.com/AdrienCambier1/tp-docker-m2/.github/workflows/ci-cd.yaml@refs/tags/v2.0.0`).
+- La publication reconstruit les variantes amd64 et arm64 : chacune est donc scannée par Trivy et Grype sur son digest et son SBOM réels avant signature de l'index. L'intégration Compose préalable porte sur amd64.
 
 ## 7. Preuves
 
@@ -85,12 +91,14 @@ docker buildx bake -f docker-bake.hcl api-ci
 ```text
 flake8 / hadolint : exit 0
 dive      : efficiency 99.71 %, PASS
-trivy     : API 0, requirements.txt 0, DB 0
+trivy     : API, requirements.txt, DB : 0 HIGH/CRITICAL corrigeable
 grype     : 0 match, CVE-2026-114583 levée par VEX (not_affected)
 compose   : api healthy, db healthy
 /health   : {"status":"ok"}   /dbtest : {"db_connection":"successful"}
 pytest    : 3 passed
 ```
+
+Validation locale après audit du 29/10/2026 (Docker 29.9.2, Buildx 0.38.1, BuildKit 0.33.1) : builds amd64 et arm64, runtime non-root sans shell/pip/ensurepip, Compose sain, trois routes HTTP validées sur les deux architectures (arm64 émulée), **5 tests pytest réussis** sur amd64. Trivy et Grype passent sur les deux nouvelles images, avec la même exemption VEX résiduelle. Dive : **97,63 %** ; le retrait des roues pip héritées masque environ 1,8 Mo dans la couche de base, ce qui explique la baisse depuis 2.0.0. Le jeton est absent des métadonnées et des 2 174 fichiers des couches décompressées contrôlées sur amd64. Les secrets absents et vides sont refusés lors d'un build sans cache.
 
 ## 8. Industrialisation BuildKit (étape 1)
 
@@ -98,12 +106,14 @@ pytest    : 3 passed
 
 | Scénario (local, `bake api-ci`) | Durée | Paquets téléchargés |
 |---|---|---|
-| Build à froid (`docker builder prune -af`) | 10,7 s | 9 |
-| Ajout d'une dépendance mineure, cache persistant | 3,8 s | 1 (les 9 autres « Using cached ») |
-| Même modification avec le Dockerfile du TP1 (`--no-cache-dir`) | 4,9 s | 10 |
-| Rebuild sans modification | 1,5 s | 0 |
+| Build à froid (builder neuf, téléchargement des bases inclus) | 26,90 s | 9 |
+| Ajout de `packaging==26.3`, cache persistant | 4,03 s | 1 (les 9 autres « Using cached ») |
+| Même installation avec `--no-cache-dir` | 4,15 s | 10 |
+| Rebuild sans modification | 2,61 s | 0 |
 
-En CI, le cache est importé et exporté en mode `max` (`type=gha`), un scope par cible.
+Mesures du 29/10/2026, sous Docker 29.9.2 / Buildx 0.38.1 / BuildKit 0.33.1, avec `docker buildx bake -f docker-bake.hcl api-ci` sur un builder `docker-container` dédié. La dépendance supplémentaire est ajoutée uniquement à une copie temporaire du contexte. Le build froid inclut les téléchargements des bases ; la comparaison des deux installations mesure surtout la baisse du trafic pip (1 roue au lieu de 10), sur ce petit projet.
+
+En CI, le cache de couches est importé et exporté en mode `max` (`type=gha`), un scope par cible. Le contenu du montage cache pip reste propre au builder : il n'est pas transporté par cet export. Les mesures ci-dessus comparent des builds successifs sur le même builder.
 
 **Secret de build** : `--mount=type=secret,id=pip_token,required=true`, monté en `tmpfs` le temps de l'instruction. Le build échoue si le secret est absent ou vide. Le jeton a le format GitHub PAT (`ghp_…`) pour être reconnaissable par Trivy.
 
@@ -116,6 +126,8 @@ contrôle négatif (ARG + echo)    : jeton visible dans history, trivy : 3 x git
 ```
 
 La CI échoue si le jeton apparaît dans `history`, `inspect` ou les couches. `secrets/` est ignoré par Git et exclu du contexte de build.
+
+Le secret requis n'est contrôlé que lorsque l'instruction `RUN` s'exécute : utiliser un builder neuf ou `--no-cache` pour démontrer le refus d'un secret absent ou vide, sans réutiliser une couche existante.
 
 **Manifeste distant** :
 

@@ -17,6 +17,9 @@ COPY app.py .
 
 FROM cgr.dev/chainguard/python:latest@sha256:49fd266eb8a1331194c318b742087c7a2939cc5794fa64f17feb9e17e12703e2 AS runtime
 
+USER 0:0
+RUN ["/usr/bin/python", "-c", "import pathlib, shutil, sysconfig; shutil.rmtree(pathlib.Path(sysconfig.get_path('stdlib')) / 'ensurepip'); shutil.rmtree('/usr/share/python-wheels')"]
+
 ENV PYTHONPATH=/app/site-packages \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
