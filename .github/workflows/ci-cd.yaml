@@ -337,8 +337,12 @@ jobs:
               cosign verify-attestation "$ref" --type "$type" \
                 --certificate-identity "$identity" --certificate-oidc-issuer "$OIDC_ISSUER" > "att-${arch}-${type}.json"
             done
-            components=$(jq -r '.payload' "att-${arch}-cyclonedx.json" | head -n 1 | base64 -d \
-              | jq '[.predicate.components[] | select(.type != "file")] | length')
-            [ "$components" -gt 0 ]
-            echo "- ${arch} : signature et attestations valides, ${components} composants" >> "$GITHUB_STEP_SUMMARY"
+            count=0
+            while IFS= read -r payload; do
+              components=$(base64 -d <<< "$payload" | jq '[.predicate.components[] | select(.type != "file")] | length')
+              [ "$components" -gt 0 ]
+              count=$((count + 1))
+            done < <(jq -r '.payload' "att-${arch}-cyclonedx.json")
+            [ "$count" -gt 0 ]
+            echo "- ${arch} : signature valide, ${count} attestation(s) SBOM valides, ${components} composants" >> "$GITHUB_STEP_SUMMARY"
           done

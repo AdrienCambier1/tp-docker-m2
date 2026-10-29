@@ -177,7 +177,7 @@ cosign verify-attestation "$IMG@sha256:a28f859fbdfe58653e24377da57a2f5e47ef34a62
 ```
 
 ```bash
-cosign verify-attestation "$IMG@sha256:a28f859fbdfe58653e24377da57a2f5e47ef34a62cdf851aab8f6bd4e576a806" --type cyclonedx --certificate-identity "$ID" --certificate-oidc-issuer "$ISS" | head -n 1 | jq -r .payload | base64 -d | jq .predicate > sbom-certifie.cdx.json
+cosign verify-attestation "$IMG@sha256:a28f859fbdfe58653e24377da57a2f5e47ef34a62cdf851aab8f6bd4e576a806" --type cyclonedx --certificate-identity "$ID" --certificate-oidc-issuer "$ISS" | jq -rs '.[0].payload' | base64 -d | jq .predicate > sbom-certifie.cdx.json
 ```
 
 Remplacer le digest amd64 par celui d'arm64, ou `cyclonedx` par `spdxjson`, pour les autres attestations. Résultats obtenus :
