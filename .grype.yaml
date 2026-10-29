@@ -1,0 +1,9 @@
+fail-on-severity: high
+only-fixed: false
+vex-documents:
+  - security.vex.json
+output:
+  - table
+db:
+  auto-update: true
+  validate-age: true

@@ -1,0 +1,30 @@
+{
+  "@context": "https://openvex.dev/ns/v0.2.0",
+  "@id": "https://github.com/AdrienCambier1/tp-docker-m2/blob/main/security.vex.json",
+  "author": "Binôme tp-docker-m2 (AdrienCambier1, Quantix06)",
+  "role": "Mainteneurs de l'image ghcr.io/adriencambier1/tp-docker-m2-api",
+  "timestamp": "2026-10-29T12:00:00Z",
+  "version": 1,
+  "statements": [
+    {
+      "vulnerability": {
+        "@id": "https://nvd.nist.gov/vuln/detail/CVE-2026-114583",
+        "name": "CVE-2026-114583",
+        "description": "Contournement de tarfile.tar_filter permettant l'écriture hors du répertoire cible lors d'un tarfile.extractall() sur une archive malveillante."
+      },
+      "timestamp": "2026-10-29T12:00:00Z",
+      "products": [
+        {
+          "@id": "pkg:oci/tp-docker-m2-api?repository_url=ghcr.io/adriencambier1/tp-docker-m2-api",
+          "subcomponents": [
+            { "@id": "pkg:apk/wolfi/python-3.15" }
+          ]
+        },
+        { "@id": "pkg:apk/wolfi/python-3.15" }
+      ],
+      "status": "not_affected",
+      "justification": "vulnerable_code_not_in_execute_path",
+      "impact_statement": "L'API (app.py, Flask, Werkzeug, gunicorn, psycopg2) n'importe jamais le module tarfile et n'extrait aucune archive : elle n'expose que /health, /hello et /dbtest, sans téléversement de fichier. Le runtime ne contient ni shell ni pip pour déclencher une extraction, et le système de fichiers est monté en lecture seule. Aucun correctif n'est encore publié par Wolfi ; la déclaration sera revue à la publication du correctif."
+    }
+  ]
+}
